@@ -6,16 +6,24 @@ const path = require('path');
 const axios = require('axios');
 const { GoogleGenAI } = require('@google/genai');
 
+dotenv.config({ path: path.join(__dirname, '..', '.env') });
 dotenv.config();
+
+const { evaluateEligibility, assembleDeterministicGraph } = require('./rules/eligibilityEngine');
+const { validateGraph } = require('./utils/graphValidator');
+const { validateGovernmentUrl } = require('./utils/urlValidator');
+
+process.on('uncaughtException', (err) => console.error('[UncaughtException]', err));
+process.on('unhandledRejection', (reason) => console.error('[UnhandledRejection]', reason));
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || '').trim();
 
 app.use(cors());
 app.use(express.json());
 
-// Load seed cases
+// Load canonical seed cases as fallback
 const seedCasesPath = path.join(__dirname, 'data', 'seed_cases.json');
 let seedCases = [];
 try {
@@ -29,7 +37,11 @@ try {
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    geminiConfigured: !!(GEMINI_API_KEY && GEMINI_API_KEY !== 'your_gemini_api_key_here'),
+    model: 'gemini-3.8-flash',
+    domain: 'Building & Construction Permitting in Maharashtra (UDCPR 2020 & MRTP Act 1966)',
+    supportedTypologies: ['RESIDENTIAL', 'COMMERCIAL', 'INSTITUTIONAL', 'HOSPITALITY', 'MIXED_USE', 'INDUSTRIAL', 'OTHER']
   });
 });
 
@@ -41,6 +53,7 @@ app.get('/api/tasks', (req, res) => {
       taskId: c.taskId,
       taskTitle: c.taskTitle,
       title: c.taskTitle,
+      constructionType: c.constructionType || 'RESIDENTIAL',
       jurisdiction: c.jurisdiction,
       totalEstimatedDays: c.totalEstimatedDays,
       estimatedDays: c.totalEstimatedDays,
@@ -56,87 +69,145 @@ app.get('/api/tasks', (req, res) => {
   }
 });
 
-// 3. Navigation DAG Generator / Fallback
+// 3. Deterministic Eligibility / Rules Evaluation Endpoint
+app.post('/api/eligibility', (req, res) => {
+  try {
+    const questionnaire = req.body || {};
+    const evaluation = evaluateEligibility(questionnaire);
+    res.json(evaluation);
+  } catch (err) {
+    console.error('[Error] POST /api/eligibility:', err.message);
+    res.status(500).json({ error: 'Failed to evaluate eligibility' });
+  }
+});
+
+// 4. Navigation DAG Generator / Fallback
 app.post('/api/navigate', async (req, res) => {
-  const { query = '', city = '' } = req.body;
-  const lowerQuery = (query + ' ' + city).toLowerCase();
+  const { query = '', city = '', questionnaire = null } = req.body;
 
-  const keywords = ['house', 'building', 'residential', 'construction', 'bungalow', 'udcpr'];
-  const matchesKeyword = keywords.some((kw) => lowerQuery.includes(kw));
+  // Build input params either from explicit questionnaire or from query/city
+  let detectedType = 'RESIDENTIAL';
+  if (/commercial|shop|mall|retail|office/i.test(query)) detectedType = 'COMMERCIAL';
+  else if (/school|college|hospital|institutional|clinic/i.test(query)) detectedType = 'INSTITUTIONAL';
+  else if (/hotel|resort|lodge|restaurant|hospitality/i.test(query)) detectedType = 'HOSPITALITY';
+  else if (/mixed[- ]use|shops and apartments/i.test(query)) detectedType = 'MIXED_USE';
+  else if (/industrial|factory|manufacturing|plant|warehouse/i.test(query)) detectedType = 'INDUSTRIAL';
 
-  // If query explicitly matches residential construction / UDCPR keywords or if default is requested
-  if (matchesKeyword || !query.trim()) {
-    const defaultGraph = seedCases[0] || null;
-    return res.status(200).json(defaultGraph);
+  const parsedQuestionnaire = questionnaire || {
+    constructionType: detectedType,
+    jurisdiction: city || 'Maharashtra',
+    plotArea: 150,
+    buildingHeight: /high-rise|15m|tall/i.test(query) ? 18.0 : 8.5,
+    roadWidth: /narrow|4m|6m/i.test(query) ? 6.0 : 9.0,
+    treesAffected: /tree|cutting/i.test(query) ? 2 : 0,
+    heritageZone: /heritage|historic|precinct/i.test(query),
+    airportZone: /airport|flight|funnel|nocas/i.test(query),
+    ecoSensitiveZone: /matheran|eco|hill|forest/i.test(city || query),
+    hasHighTensionLine: /high tension|ht wire|power line/i.test(query)
+  };
+
+  if (!parsedQuestionnaire.constructionType) {
+    parsedQuestionnaire.constructionType = detectedType;
   }
 
-  // Dynamic Civic Generation using Gemini API
-  if (GEMINI_API_KEY) {
+  // Evaluate deterministic eligibility first
+  const eligibility = evaluateEligibility(parsedQuestionnaire);
+
+  // Dynamic Civic Generation using Gemini API (if key configured)
+  const isKeyValid = GEMINI_API_KEY && GEMINI_API_KEY !== 'your_gemini_api_key_here';
+  
+  if (isKeyValid) {
     try {
       const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-      const prompt = `You are a Municipal Law & Civic Bureaucracy Expert in India. Deconstruct the following citizen civic request into a comprehensive directed acyclic graph (DAG) representing statutory administrative steps, clearances, inspections, legal references, forms, and bottlenecks.
-City/Jurisdiction: ${city || 'Urban Local Body (India)'}
-Citizen Query: "${query}"
+      const prompt = `You are an expert Town Planner and Municipal Law Specialist for Indian Urban Local Bodies (UDCPR 2020 / MRTP Act 1966).
+Deconstruct this Building & Permitting request for a ${parsedQuestionnaire.constructionType} construction project into a precise Directed Acyclic Graph (DAG) of municipal approvals, PreDCR CAD scrutiny, IOD, site inspections, plinth check, parallel NOCs, and Occupancy Certificate (OC).
 
-Return a valid JSON object matching this exact schema:
+Project Parameters & Eligibility Constraints:
+- Construction Typology: ${parsedQuestionnaire.constructionType}
+- Jurisdiction: ${parsedQuestionnaire.jurisdiction}
+- Proposed Building Height: ${parsedQuestionnaire.buildingHeight}m
+- Plot Area: ${parsedQuestionnaire.plotArea} sq.m
+- Abutting Road Width: ${parsedQuestionnaire.roadWidth}m
+- Mandatory Parallel NOCs according to statutory rules engine: ${eligibility.applicable.map(a => a.name).join(', ')}
+- Clearances Requiring Verification: ${eligibility.uncertain.map(u => u.name).join(', ')}
+- Exempt Clearances: ${eligibility.exempt.map(e => e.name).join(', ')}
+
+Return valid JSON with exact schema:
 {
-  "taskId": "slug-id",
-  "taskTitle": "Clear, official title of the municipal permitting/clearance process",
-  "jurisdiction": "Applicable municipality/department and state acts",
-  "totalEstimatedDays": 45,
-  "totalEstimatedCostINR": 15000,
-  "legalReference": "Relevant statutory Acts, municipal bylaws, or regulations",
+  "taskId": "${parsedQuestionnaire.constructionType.toLowerCase()}-building-permission-mh-custom",
+  "taskTitle": "Full Municipal Permitting Pipeline: ${parsedQuestionnaire.constructionType} Project in ${parsedQuestionnaire.jurisdiction}",
+  "constructionType": "${parsedQuestionnaire.constructionType}",
+  "jurisdiction": "${parsedQuestionnaire.jurisdiction} Municipal Corporation / Council (UDCPR 2020 / MahaBPAMS)",
+  "totalEstimatedDays": 90,
+  "totalEstimatedCostINR": 58500,
+  "legalReference": "Maharashtra Regional & Town Planning (MRTP) Act 1966 & UDCPR 2020",
   "nodes": [
     {
-      "id": "node_unique_id",
-      "stage": "Stage name (e.g., Stage 1: Document Verification)",
+      "id": "node_id",
+      "stage": "Stage 1: Revenue & Land Title | Stage 2: Architectural Scrutiny & PreDCR | Stage 3: Parallel Departmental NOCs | Stage 4: Groundbreaking to Superstructure | Stage 5: Habitation & Utilities",
       "title": "Official step title",
-      "department": "Governing department name",
+      "department": "Governing authority",
       "type": "prerequisite | submission | inspection | conditional_approval | clearance | permit | final_approval",
       "estimatedDays": 5,
       "cost": 500,
-      "statutoryRule": "Specific section/regulation",
-      "forms": ["Form name/number"],
-      "officialUrl": "https://official-portal-url.gov.in",
-      "plainLanguageSummary": "Citizen-friendly explanation of why this step is required and what happens.",
-      "isBottleneck": true/false
+      "statutoryRule": "UDCPR 2020 Section / Rule",
+      "forms": ["Form names"],
+      "officialUrl": "https://mahadma.maharashtra.gov.in",
+      "plainLanguageSummary": "Citizen-friendly description of why this step is mandatory.",
+      "isBottleneck": true
     }
   ],
   "edges": [
-    {
-      "id": "e_source_target",
-      "source": "source_node_id",
-      "target": "target_node_id",
-      "label": "Prerequisite relation or conditional requirement"
-    }
+    { "id": "e_source_target", "source": "source_id", "target": "target_id", "label": "Dependency label" }
   ]
 }`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+      // Set explicit timeout on Gemini call
+      const aiPromise = ai.models.generateContent({
+        model: 'gemini-3.8-flash',
         contents: prompt,
         config: {
           responseMimeType: 'application/json',
-          systemInstruction: 'You are an authoritative civic administrative workflow graph generator. Always return valid structured JSON describing official legal procedures in India with realistic statutory stages, realistic fees in INR, statutory rules, and bottleneck flags.'
+          systemInstruction: 'You are an authoritative town planning workflow generator for construction projects under Maharashtra UDCPR 2020. You must respect the deterministic eligibility outputs and never invent unverified statutory approvals.'
         }
       });
+      aiPromise.catch(() => {}); // prevent unhandledRejection if timeout triggers first
 
-      const rawText = response.text;
-      const parsed = JSON.parse(rawText);
-      return res.status(200).json(parsed);
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Gemini API call timed out after 10000ms')), 10000)
+      );
+
+      const response = await Promise.race([aiPromise, timeoutPromise]);
+      const parsed = JSON.parse(response.text);
+
+      // Strict schema validation before sending to frontend
+      const validation = validateGraph(parsed);
+      if (validation.isValid) {
+        return res.status(200).json({
+          ...validation.sanitizedGraph,
+          constructionType: parsedQuestionnaire.constructionType,
+          provenance: 'live_ai_grounded',
+          provenanceLabel: 'Live AI-tailored roadmap (UDCPR 2020)',
+          eligibility
+        });
+      } else {
+        console.warn('[Validation Warning] Gemini response failed strict schema validation:', validation.errors);
+      }
     } catch (aiErr) {
-      console.warn('[Warning] Dynamic Gemini DAG generation failed or timed out. Falling back to statutory seed case graph.', aiErr.message);
+      console.warn('[Warning] Dynamic Gemini DAG generation unavailable (Quota/Timeout/Error). Serving deterministic UDCPR 2020 blueprint:', aiErr.message);
     }
-  } else {
-    console.warn('[Warning] GEMINI_API_KEY is not set. Falling back to default statutory seed case.');
   }
 
-  // Graceful fallback: return statutory seed case graph
-  const defaultGraph = seedCases[0] || {};
-  return res.status(200).json(defaultGraph);
+  // Deterministic Blueprint (Customized according to plot questionnaire & UDCPR 2020 rules)
+  const deterministicGraph = assembleDeterministicGraph(parsedQuestionnaire);
+  return res.status(200).json({
+    ...deterministicGraph,
+    provenance: 'deterministic_curated',
+    provenanceLabel: 'Curated statutory blueprint (UDCPR 2020)'
+  });
 });
 
-// 4. Government Link Status Checker
+// 5. Government Link Status Checker (With Strict SSRF Protection)
 app.get('/api/link-status', async (req, res) => {
   const targetUrl = req.query.url;
 
@@ -144,14 +215,19 @@ app.get('/api/link-status', async (req, res) => {
     return res.status(400).json({ error: 'Missing or invalid "url" query parameter' });
   }
 
-  try {
-    const parsed = new URL(targetUrl);
-    if (!['http:', 'https:'].includes(parsed.protocol)) {
-      return res.status(400).json({ error: 'Invalid URL protocol' });
-    }
+  // SSRF Validation
+  const validation = await validateGovernmentUrl(targetUrl);
+  if (!validation.isAllowed) {
+    return res.status(403).json({
+      error: 'Security Restriction: URL not permitted.',
+      reason: validation.reason,
+      url: targetUrl
+    });
+  }
 
-    const response = await axios.get(targetUrl, {
-      timeout: 3000,
+  try {
+    const response = await axios.get(validation.normalizedUrl, {
+      timeout: 4000,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
       },
@@ -159,13 +235,13 @@ app.get('/api/link-status', async (req, res) => {
     });
 
     return res.json({
-      url: targetUrl,
+      url: validation.normalizedUrl,
       reachable: response.status >= 200 && response.status < 400,
       status: response.status
     });
   } catch (err) {
     return res.json({
-      url: targetUrl,
+      url: validation.normalizedUrl,
       reachable: false,
       status: err.response ? err.response.status : null,
       error: err.code || err.message
@@ -173,16 +249,71 @@ app.get('/api/link-status', async (req, res) => {
   }
 });
 
+// 6. Dynamic Civic Jargon / Acronym Explainer (Gemini AI + Heuristics)
+app.post('/api/explain-term', async (req, res) => {
+  const { term = '', context = '' } = req.body;
+  if (!term || typeof term !== 'string') {
+    return res.status(400).json({ error: 'Missing or invalid "term" in request body' });
+  }
+
+  const isKeyValid = GEMINI_API_KEY && GEMINI_API_KEY !== 'your_gemini_api_key_here';
+
+  if (isKeyValid) {
+    try {
+      const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+      const prompt = `Explain the following statutory/municipal administrative term or legal acronym used in Maharashtra residential building permission (UDCPR 2020 / MRTP Act 1966):
+Term: "${term}"
+Context: "${context || 'Maharashtra Urban Local Body / Town Planning Dept'}"
+
+Return a valid JSON object matching:
+{
+  "term": "${term}",
+  "category": "Land Title | PreDCR / Architectural | Departmental NOC | Construction Phase | Habitation",
+  "shortDef": "Concise 3-6 word definition",
+  "explanation": "Clear plain-language explanation of what this term means, why it is required by government authorities under UDCPR 2020, and what citizens need to do.",
+  "statutoryAct": "Relevant legal Act/Regulation (e.g., UDCPR 2020 Reg 2.2, MRTP Act 1966 Sec 45, Maharashtra Tree Act 1975)"
+}`;
+
+      const aiPromise = ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+          systemInstruction: 'You are an expert in Maharashtra municipal administrative law, revenue records, and UDCPR 2020 building permissions. Explain statutory terms in clear, plain citizen-friendly English.'
+        }
+      });
+
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('AI explanation timed out')), 6000)
+      );
+
+      const response = await Promise.race([aiPromise, timeoutPromise]);
+      const parsed = JSON.parse(response.text);
+      return res.status(200).json(parsed);
+    } catch (err) {
+      console.warn('[Warning] Dynamic Jargon AI explanation failed:', err.message);
+    }
+  }
+
+  // Graceful statutory heuristic fallback
+  return res.status(200).json({
+    term: term,
+    category: 'Civic Regulatory Term',
+    shortDef: 'Statutory Administrative Requirement',
+    explanation: `Official municipal procedure or clearance document required under Maharashtra UDCPR 2020 / MRTP Act 1966.`,
+    statutoryAct: 'Maharashtra UDCPR 2020 & MRTP Act 1966'
+  });
+});
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
     return res.status(400).json({ error: 'Invalid JSON payload' });
   }
-  console.error('[Unhandled Error]:', err);
+  console.error('[Unhandled Error]:', err.message);
   return res.status(500).json({ error: 'Internal Server Error' });
 });
 
 app.listen(PORT, () => {
   console.log(`[Municipal Bureaucracy API] Server running on http://localhost:${PORT}`);
 });
-

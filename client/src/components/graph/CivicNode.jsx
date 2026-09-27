@@ -34,10 +34,10 @@ export default function CivicNode({ data, selected }) {
 
   const handleToggleStatus = (e) => {
     e.stopPropagation();
-    if (!onStatusChange) return;
+    if (!onStatusChange || isLocked) return;
     if (isCompleted) {
       onStatusChange(id, 'available');
-    } else {
+    } else if (isAvailable) {
       onStatusChange(id, 'completed');
     }
   };
@@ -51,13 +51,13 @@ export default function CivicNode({ data, selected }) {
         'group relative rounded-2xl border p-4 shadow-xl min-w-[300px] max-w-[320px] transition-all duration-300 text-left cursor-pointer font-sans select-none backdrop-blur-md',
         // Status border & background styling
         isCompleted &&
-          'border-emerald-500/80 bg-slate-900/95 text-slate-100 ring-1 ring-emerald-500/40 shadow-emerald-950/40 hover:border-emerald-400',
+          'border-[#2BB673] bg-[#FFFFFF] text-[#111111] ring-1 ring-[#2BB673]/30 shadow-md hover:border-[#2BB673]',
         isAvailable &&
-          'border-indigo-500/80 bg-slate-900/95 text-slate-100 ring-1 ring-indigo-500/40 shadow-indigo-950/40 hover:border-indigo-400',
+          'border-[#F56600] bg-[#FFFFFF] text-[#111111] ring-1 ring-[#F56600]/30 shadow-md hover:border-[#E85D00]',
         isLocked &&
-          'border-slate-800 bg-slate-950/80 text-slate-400 opacity-65 hover:opacity-80 hover:border-slate-700',
+          'border-[#E5E5E5] bg-[#FAFAFA] text-[#888888] opacity-75 hover:opacity-90 hover:border-[#E5E5E5]',
         selected &&
-          'ring-2 ring-indigo-400 border-indigo-400 shadow-[0_0_25px_rgba(99,102,241,0.35)] scale-[1.02]'
+          'ring-2 ring-[#F56600] border-[#F56600] shadow-[0_0_20px_rgba(245,102,0,0.25)] scale-[1.02]'
       )}
     >
       {/* React Flow Target Handle */}
@@ -65,10 +65,10 @@ export default function CivicNode({ data, selected }) {
         type="target"
         position={targetPosition}
         className={clsx(
-          '!w-3.5 !h-3.5 !border-2 !border-slate-900 transition-all duration-200',
-          isCompleted && '!bg-emerald-400 shadow-[0_0_8px_#34d399]',
-          isAvailable && '!bg-indigo-400 shadow-[0_0_8px_#818cf8]',
-          isLocked && '!bg-slate-600'
+          '!w-3.5 !h-3.5 !border-2 !border-[#FFFFFF] transition-all duration-200',
+          isCompleted && '!bg-[#2BB673] shadow-[0_0_8px_rgba(43,182,115,0.4)]',
+          isAvailable && '!bg-[#F56600] shadow-[0_0_8px_rgba(245,102,0,0.4)]',
+          isLocked && '!bg-[#888888]'
         )}
       />
 
@@ -77,9 +77,9 @@ export default function CivicNode({ data, selected }) {
         <span
           className={clsx(
             'text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full truncate border',
-            isCompleted && 'bg-emerald-950/70 text-emerald-300 border-emerald-800/60',
-            isAvailable && 'bg-indigo-950/70 text-indigo-300 border-indigo-800/60',
-            isLocked && 'bg-slate-900 text-slate-400 border-slate-800'
+            isCompleted && 'bg-[#E6F8EF] text-[#2BB673] border-[#2BB673]/30',
+            isAvailable && 'bg-[#FFF1E8] text-[#F56600] border-[#F56600]/30',
+            isLocked && 'bg-[#FAFAFA] text-[#888888] border-[#E5E5E5]'
           )}
         >
           {stage}
@@ -87,20 +87,20 @@ export default function CivicNode({ data, selected }) {
 
         <div className="flex items-center gap-1 shrink-0">
           {isCompleted && (
-            <span className="flex items-center gap-1 text-[11px] font-semibold text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded-full border border-emerald-800/50">
-              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="flex items-center gap-1 text-[11px] font-semibold text-[#2BB673] bg-[#E6F8EF] px-2 py-0.5 rounded-full border border-[#2BB673]/40">
+              <CheckCircle2 className="w-3.5 h-3.5 text-[#2BB673]" />
               Done
             </span>
           )}
           {isAvailable && (
-            <span className="flex items-center gap-1 text-[11px] font-semibold text-indigo-300 bg-indigo-950/60 px-2 py-0.5 rounded-full border border-indigo-800/50">
-              <CircleDashed className="w-3.5 h-3.5 text-indigo-400 animate-spin-slow" />
+            <span className="flex items-center gap-1 text-[11px] font-semibold text-[#F56600] bg-[#FFF1E8] px-2 py-0.5 rounded-full border border-[#F56600]/40">
+              <CircleDashed className="w-3.5 h-3.5 text-[#F56600] animate-spin-slow" />
               Actionable
             </span>
           )}
           {isLocked && (
-            <span className="flex items-center gap-1 text-[11px] font-medium text-slate-400 bg-slate-900/80 px-2 py-0.5 rounded-full border border-slate-800">
-              <Lock className="w-3 h-3 text-slate-500" />
+            <span className="flex items-center gap-1 text-[11px] font-medium text-[#888888] bg-[#FAFAFA] px-2 py-0.5 rounded-full border border-[#E5E5E5]">
+              <Lock className="w-3 h-3 text-[#888888]" />
               Prereq Locked
             </span>
           )}
@@ -111,9 +111,9 @@ export default function CivicNode({ data, selected }) {
       <h3
         className={clsx(
           'font-bold text-sm leading-snug my-1 line-clamp-2',
-          isCompleted && 'text-slate-100',
-          isAvailable && 'text-white',
-          isLocked && 'text-slate-400'
+          isCompleted && 'text-[#111111]',
+          isAvailable && 'text-[#111111]',
+          isLocked && 'text-[#888888]'
         )}
       >
         {title}
@@ -124,54 +124,54 @@ export default function CivicNode({ data, selected }) {
         <span
           className={clsx(
             'inline-flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-lg font-medium truncate max-w-full border',
-            isCompleted && 'bg-slate-850 text-slate-300 border-slate-800',
-            isAvailable && 'bg-slate-850 text-slate-200 border-slate-750',
-            isLocked && 'bg-slate-900/60 text-slate-500 border-slate-850'
+            isCompleted && 'bg-[#FAFAFA] text-[#666666] border-[#E5E5E5]',
+            isAvailable && 'bg-[#FAFAFA] text-[#111111] border-[#E5E5E5]',
+            isLocked && 'bg-[#FAFAFA] text-[#888888] border-[#E5E5E5]'
           )}
         >
-          <Building className="w-3 h-3 shrink-0 text-slate-400" />
+          <Building className="w-3 h-3 shrink-0 text-[#888888]" />
           <span className="truncate">{department}</span>
         </span>
       </div>
 
       {/* Statutory Rule Citation */}
       {statutoryRule && (
-        <div className="flex items-center gap-1.5 text-[10px] text-slate-400 italic truncate mb-2 font-mono">
-          <Scale className="w-3 h-3 text-indigo-400 shrink-0" />
+        <div className="flex items-center gap-1.5 text-[10px] text-[#888888] italic truncate mb-2 font-mono">
+          <Scale className="w-3 h-3 text-[#F56600] shrink-0" />
           <span className="truncate">{statutoryRule}</span>
         </div>
       )}
 
       {/* Bottleneck Alert */}
       {isBottleneck && (
-        <div className="flex items-center gap-1.5 px-2.5 py-1 mb-2 rounded-lg bg-amber-950/50 border border-amber-800/60 text-amber-300 text-[11px] font-semibold">
-          <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+        <div className="flex items-center gap-1.5 px-2.5 py-1 mb-2 rounded-lg bg-[#FEF3C7] border border-[#F59E0B]/40 text-[#F59E0B] text-[11px] font-semibold">
+          <AlertTriangle className="w-3.5 h-3.5 text-[#F59E0B] shrink-0" />
           <span className="truncate">Known Municipal Bottleneck</span>
         </div>
       )}
 
       {/* Metric Bar & Status Toggle Button */}
-      <div className="pt-2.5 mt-2 border-t border-slate-800 flex items-center justify-between gap-2 text-xs">
+      <div className="pt-2.5 mt-2 border-t border-[#E5E5E5] flex items-center justify-between gap-2 text-xs">
         <div className="flex items-center gap-3">
           <div
             className={clsx(
               'flex items-center gap-1 font-medium',
-              isCompleted ? 'text-emerald-400' : isAvailable ? 'text-slate-300' : 'text-slate-400'
+              isCompleted ? 'text-[#2BB673]' : isAvailable ? 'text-[#666666]' : 'text-[#888888]'
             )}
             title="Estimated turnaround time"
           >
-            <Clock className="w-3.5 h-3.5 text-blue-400" />
+            <Clock className="w-3.5 h-3.5 text-[#4A7DFF]" />
             <span>{estimatedDays}d</span>
           </div>
 
           <div
             className={clsx(
               'flex items-center gap-0.5 font-medium',
-              isCompleted ? 'text-emerald-400' : isAvailable ? 'text-emerald-300' : 'text-slate-400'
+              isCompleted ? 'text-[#2BB673]' : isAvailable ? 'text-[#2BB673]' : 'text-[#888888]'
             )}
             title="Estimated fee"
           >
-            <IndianRupee className="w-3.5 h-3.5 text-emerald-400" />
+            <IndianRupee className="w-3.5 h-3.5 text-[#2BB673]" />
             <span>{Number(cost).toLocaleString('en-IN')}</span>
           </div>
         </div>
@@ -180,14 +180,22 @@ export default function CivicNode({ data, selected }) {
         <button
           type="button"
           onClick={handleToggleStatus}
+          disabled={isLocked}
           className={clsx(
-            'inline-flex items-center gap-1 px-3 py-1 rounded-lg text-[11px] font-semibold transition-all shadow-md active:scale-95 focus:outline-none',
+            'inline-flex items-center gap-1 px-3 py-1 rounded-lg text-[11px] font-semibold transition-all shadow-md',
             isCompleted
-              ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-600/30'
+              ? 'bg-[#2BB673] hover:bg-[#2BB673]/90 text-white shadow-[#2BB673]/30 cursor-pointer active:scale-95'
               : isAvailable
-              ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-600/30'
-              : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700'
+              ? 'bg-[#F56600] hover:bg-[#E85D00] text-white shadow-[#F56600]/30 cursor-pointer active:scale-95'
+              : 'bg-[#FAFAFA] text-[#888888] border border-[#E5E5E5] cursor-not-allowed opacity-60'
           )}
+          title={
+            isCompleted
+              ? 'Undo step completion'
+              : isAvailable
+              ? 'Mark this step completed'
+              : 'Prerequisites must be completed first'
+          }
         >
           {isCompleted ? (
             <>
@@ -201,7 +209,8 @@ export default function CivicNode({ data, selected }) {
             </>
           ) : (
             <>
-              <span>Unlock</span>
+              <Lock className="w-3 h-3" />
+              <span>Locked</span>
             </>
           )}
         </button>
@@ -212,10 +221,10 @@ export default function CivicNode({ data, selected }) {
         type="source"
         position={sourcePosition}
         className={clsx(
-          '!w-3.5 !h-3.5 !border-2 !border-slate-900 transition-all duration-200',
-          isCompleted && '!bg-emerald-400 shadow-[0_0_8px_#34d399]',
-          isAvailable && '!bg-indigo-400 shadow-[0_0_8px_#818cf8]',
-          isLocked && '!bg-slate-600'
+          '!w-3.5 !h-3.5 !border-2 !border-[#FFFFFF] transition-all duration-200',
+          isCompleted && '!bg-[#2BB673] shadow-[0_0_8px_rgba(43,182,115,0.4)]',
+          isAvailable && '!bg-[#F56600] shadow-[0_0_8px_rgba(245,102,0,0.4)]',
+          isLocked && '!bg-[#888888]'
         )}
       />
     </div>

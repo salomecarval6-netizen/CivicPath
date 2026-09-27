@@ -2,23 +2,23 @@
 
 @layer base {
   body {
-    @apply bg-slate-950 text-slate-100 font-sans antialiased overflow-hidden select-none;
+    @apply bg-[#FAFAFA] text-[#111111] font-sans antialiased overflow-hidden select-none;
   }
 
-  /* Custom Slim Dark Scrollbars */
+  /* Custom Slim Light Scrollbars */
   ::-webkit-scrollbar {
     width: 6px;
     height: 6px;
   }
   ::-webkit-scrollbar-track {
-    background: #090d16;
+    background: #FAFAFA;
   }
   ::-webkit-scrollbar-thumb {
-    background: #334155;
+    background: #E5E5E5;
     border-radius: 9999px;
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: #475569;
+    background: #888888;
   }
 }
 

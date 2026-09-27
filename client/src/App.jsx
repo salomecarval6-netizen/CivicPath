@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import axios from 'axios';
+import clsx from 'clsx';
 import {
   Compass,
   Search,
@@ -7,19 +8,65 @@ import {
   Loader2,
   Sparkles,
   Building2,
-  Utensils,
-  Store,
+  Home,
+  Mountain,
+  FileCheck,
   Menu,
   X,
   FileText,
   MapPin,
   RefreshCw,
-  AlertCircle
+  AlertCircle,
+  PanelRightClose,
+  PanelRightOpen,
+  Sliders,
+  ShieldCheck,
+  Trees,
+  CheckCircle2
 } from 'lucide-react';
 
 import RoadmapCanvas from './components/graph/RoadmapCanvas';
 import DocumentDrawer from './components/sidebar/DocumentDrawer';
 import JargonBusterModal from './components/common/JargonBusterModal';
+import PlotQuestionnaireModal from './components/intake/PlotQuestionnaireModal';
+import HomePage from './components/home/HomePage';
+import { API_ENDPOINTS } from './config/api';
+import { classifyRequirementScope } from './utils/scopeClassifier';
+
+// Helper to determine the next consecutive step in the workflow sequence
+function getNextConsecutiveStep(currentNodeId, nodes = [], edges = [], completedSet = new Set()) {
+  if (!nodes || nodes.length === 0) return null;
+
+  const currentIndex = nodes.findIndex((n) => n.id === currentNodeId);
+  if (currentIndex === -1) {
+    return nodes.find((n) => !completedSet.has(n.id)) || nodes[0];
+  }
+
+  // 1. First priority: Check direct outgoing children in the DAG edges
+  const directChildrenIds = (edges || [])
+    .filter((e) => e.source === currentNodeId)
+    .map((e) => e.target);
+
+  const uncompletedChildId = directChildrenIds.find((cId) => !completedSet.has(cId));
+  if (uncompletedChildId) {
+    const childNode = nodes.find((n) => n.id === uncompletedChildId);
+    if (childNode) return childNode;
+  }
+
+  // 2. Second priority: Next consecutive node in statutory/topological order
+  for (let i = currentIndex + 1; i < nodes.length; i++) {
+    if (!completedSet.has(nodes[i].id)) {
+      return nodes[i];
+    }
+  }
+
+  // 3. Third priority: Any remaining uncompleted node in the graph
+  const anyRemaining = nodes.find((n) => !completedSet.has(n.id) && n.id !== currentNodeId);
+  if (anyRemaining) return anyRemaining;
+
+  // 4. Final step edge case: keep current step selected, do not advance beyond
+  return nodes[currentIndex];
+}
 
 // Statutory Fallback Seed Data (Maharashtra UDCPR 2020)
 const FALLBACK_SEED_GRAPH = {
@@ -29,6 +76,8 @@ const FALLBACK_SEED_GRAPH = {
   totalEstimatedDays: 90,
   totalEstimatedCostINR: 58500,
   legalReference: "Maharashtra Regional & Town Planning (MRTP) Act 1966 & UDCPR 2020",
+  provenance: "deterministic_curated",
+  provenanceLabel: "Curated statutory blueprint (UDCPR 2020)",
   nodes: [
     {
       id: "node_title",
@@ -75,7 +124,7 @@ const FALLBACK_SEED_GRAPH = {
     {
       id: "node_autodcr",
       stage: "Stage 2: Architectural Scrutiny & PreDCR",
-      title: "Architect CAD Plan Submission (AutoDCR Scrutiny)",
+      title: "Architect CAD Plan Submission & Automated Scrutiny (MahaBPAMS / MCGM AutoDCR)",
       department: "Town Planning Scrutiny Cell (MahaBPAMS)",
       type: "submission",
       estimatedDays: 10,
@@ -108,7 +157,7 @@ const FALLBACK_SEED_GRAPH = {
     {
       id: "node_iod",
       stage: "Stage 2: Architectural Scrutiny & PreDCR",
-      title: "Intimation of Disapproval (IOD) / Conditional Sanction",
+      title: "Development Sanction / Conditional Sanction (Intimation of Disapproval - IOD in Mumbai)",
       department: "Executive Engineer / Building Proposal Department",
       type: "conditional_approval",
       estimatedDays: 5,
@@ -198,6 +247,7 @@ const FALLBACK_SEED_GRAPH = {
   edges: [
     { id: "e_title_mojani", source: "node_title", target: "node_mojani", label: "Title deed required for demarcation" },
     { id: "e_title_autodcr", source: "node_title", target: "node_autodcr", label: "Upload title proof to Appendix A-1" },
+    { id: "e_mojani_tax", source: "node_mojani", target: "node_tax_noc", label: "Demarcated plot assessment & tax clearance" },
     { id: "e_mojani_autodcr", source: "node_mojani", target: "node_autodcr", label: "Coordinates mapped into CAD drawing" },
     { id: "e_tax_autodcr", source: "node_tax_noc", target: "node_autodcr", label: "No-dues receipt required for scrutiny" },
     { id: "e_autodcr_site", source: "node_autodcr", target: "node_site_inspection", label: "CAD scrutiny clearance triggers site visit" },
@@ -211,224 +261,493 @@ const FALLBACK_SEED_GRAPH = {
   ]
 };
 
-const PRESETS = [
-  {
-    id: 'res-house',
-    label: 'Residential House (UDCPR 2020)',
-    icon: Building2,
-    query: 'Residential building bungalow permit in Maharashtra UDCPR',
-    city: 'Maharashtra'
-  },
-  {
-    id: 'cloud-kitchen',
-    label: 'Commercial Cloud Kitchen (MCGM/FSSAI)',
-    icon: Utensils,
-    query: 'Commercial cloud kitchen FSSAI health license fire NOC trade permit',
-    city: 'Mumbai'
-  },
-  {
-    id: 'gumasta-shop',
-    label: 'Shop & Establishment (Gumasta)',
-    icon: Store,
-    query: 'Shop and Establishment Act registration Gumasta license labor clearance',
-    city: 'Pune'
-  }
-];
-
 export default function App() {
+  const [currentView, setCurrentView] = useState('home'); // 'home' | 'roadmap'
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCity, setSelectedCity] = useState('Maharashtra');
   const [graphData, setGraphData] = useState(FALLBACK_SEED_GRAPH);
   const [selectedNode, setSelectedNode] = useState(null);
+  const [hasConstructedRoadmap, setHasConstructedRoadmap] = useState(false);
+  const [completedNodes, setCompletedNodes] = useState(() => {
+    try {
+      const saved = localStorage.getItem('vertexa_completed_nodes');
+      return saved ? new Set(JSON.parse(saved)) : new Set();
+    } catch {
+      return new Set();
+    }
+  });
+  const [questionnaireState, setQuestionnaireState] = useState(() => {
+    try {
+      const saved = localStorage.getItem('vertexa_plot_questionnaire');
+      return saved ? JSON.parse(saved) : {
+        constructionType: 'RESIDENTIAL',
+        customConstructionType: '',
+        mixedUseComponents: [],
+        jurisdiction: 'Pune',
+        plotArea: 200,
+        buildingHeight: 8.5,
+        roadWidth: 9.0,
+        treesAffected: 0,
+        heritageZone: false,
+        airportZone: false,
+        ecoSensitiveZone: false,
+        hasHighTensionLine: false
+      };
+    } catch {
+      return {
+        constructionType: 'RESIDENTIAL',
+        customConstructionType: '',
+        mixedUseComponents: [],
+        jurisdiction: 'Pune',
+        plotArea: 200,
+        buildingHeight: 8.5,
+        roadWidth: 9.0,
+        treesAffected: 0,
+        heritageZone: false,
+        airportZone: false,
+        ecoSensitiveZone: false,
+        hasHighTensionLine: false
+      };
+    }
+  });
+
   const [loading, setLoading] = useState(false);
   const [isJargonModalOpen, setIsJargonModalOpen] = useState(false);
+  const [isQuestionnaireOpen, setIsQuestionnaireOpen] = useState(false);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [scopeFeedback, setScopeFeedback] = useState(null);
+
+  // Sync completedNodes to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem('vertexa_completed_nodes', JSON.stringify(Array.from(completedNodes)));
+    } catch (e) {
+      console.warn('Failed to persist completed nodes to localStorage:', e);
+    }
+  }, [completedNodes]);
+
+  // Sync questionnaire state to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem('vertexa_plot_questionnaire', JSON.stringify(questionnaireState));
+    } catch (e) {
+      console.warn('Failed to persist questionnaire state to localStorage:', e);
+    }
+  }, [questionnaireState]);
 
   // Fetch roadmap from backend API
-  const fetchRoadmap = useCallback(async (query, city) => {
+  const fetchRoadmap = useCallback(async (query, city, customQuestionnaire = null) => {
     setLoading(true);
     try {
+      const effectiveQuestionnaire = customQuestionnaire || questionnaireState;
+      const payload = {
+        query: query || '',
+        city: city || effectiveQuestionnaire.jurisdiction || 'Maharashtra',
+        questionnaire: effectiveQuestionnaire
+      };
+
       const response = await axios.post(
-        'http://localhost:5000/api/navigate',
-        { query, city },
-        { timeout: 15000 }
+        API_ENDPOINTS.navigate,
+        payload,
+        { timeout: 12000 }
       );
+
       if (response.data && response.data.nodes && response.data.nodes.length > 0) {
         setGraphData(response.data);
-        setSelectedNode(null);
+        if (response.data.nodes.length > 0) {
+          setSelectedNode(response.data.nodes[0]);
+        }
       } else {
         setGraphData(FALLBACK_SEED_GRAPH);
       }
+      setHasConstructedRoadmap(true);
+      setCurrentView('roadmap');
     } catch (err) {
       console.warn('[Network/API Fallback] Using offline statutory seed graph:', err.message);
       setGraphData(FALLBACK_SEED_GRAPH);
+      setHasConstructedRoadmap(true);
+      setCurrentView('roadmap');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [questionnaireState]);
 
-  // Initial load
-  useEffect(() => {
-    fetchRoadmap('Residential house building permission', 'Maharashtra');
-  }, [fetchRoadmap]);
+  // Start Construct workflow with Scope / Intent Gate
+  const handleStartConstruct = (query) => {
+    const q = (query || searchQuery || '').trim();
+
+    // 1. Evaluate Custom Requirement Scope & Intent Gate
+    const classification = classifyRequirementScope(q);
+
+    if (classification.status !== 'IN_SCOPE') {
+      setScopeFeedback({
+        status: classification.status,
+        message: classification.message,
+        query: q
+      });
+      // Do NOT open the plot questionnaire!
+      setIsQuestionnaireOpen(false);
+      // Ensure user is on the Home page to view the clear guidance message
+      if (currentView !== 'home') {
+        setCurrentView('home');
+      }
+      return;
+    }
+
+    // 2. Clear any previous error/feedback
+    setScopeFeedback(null);
+
+    // 3. Auto-detect construction type, city, or plot keywords to preload questionnaire
+    const updatedDraft = { ...questionnaireState };
+    if (classification.constructionType) {
+      updatedDraft.constructionType = classification.constructionType;
+    }
+
+    if (/mumbai/i.test(q)) updatedDraft.jurisdiction = 'Mumbai';
+    else if (/pune/i.test(q)) updatedDraft.jurisdiction = 'Pune';
+    else if (/matheran/i.test(q)) {
+      updatedDraft.jurisdiction = 'Matheran';
+      updatedDraft.ecoSensitiveZone = true;
+    } else if (/thane/i.test(q)) updatedDraft.jurisdiction = 'Thane';
+    else if (/pcmc|pimpri/i.test(q)) updatedDraft.jurisdiction = 'Pimpri-Chinchwad';
+
+    if (/high-rise|15m|tall/i.test(q)) updatedDraft.buildingHeight = 18.0;
+    if (/heritage/i.test(q)) updatedDraft.heritageZone = true;
+    if (/airport|funnel/i.test(q)) updatedDraft.airportZone = true;
+    if (/tree/i.test(q)) updatedDraft.treesAffected = 2;
+
+    setQuestionnaireState(updatedDraft);
+
+    // 4. Launch Plot Questionnaire for user confirmation
+    setIsQuestionnaireOpen(true);
+  };
 
   const handleSearchSubmit = (e) => {
     e.preventDefault();
-    if (!searchQuery.trim()) return;
-    fetchRoadmap(searchQuery, selectedCity);
+    handleStartConstruct(searchQuery);
   };
 
-  const handlePresetSelect = (preset) => {
-    setSearchQuery(preset.query);
-    setSelectedCity(preset.city);
-    fetchRoadmap(preset.query, preset.city);
+  const handleQuestionnaireSubmit = (formData) => {
+    // Reset completed progress for a newly constructed roadmap
+    setCompletedNodes(new Set());
+    try {
+      localStorage.removeItem('vertexa_completed_nodes');
+    } catch (e) {
+      console.warn('Failed to clear completed nodes storage:', e);
+    }
+
+    setQuestionnaireState(formData);
+    setSelectedCity(formData.jurisdiction);
+    setIsQuestionnaireOpen(false);
+    fetchRoadmap(
+      searchQuery || `${formData.constructionType || 'Building'} permission in ${formData.jurisdiction}`,
+      formData.jurisdiction,
+      formData
+    );
   };
 
   const handleSelectNode = useCallback((nodeData) => {
     setSelectedNode(nodeData);
     setMobileDrawerOpen(true);
+    setIsSidebarOpen(true);
   }, []);
 
+  // Central toggle completion logic: marks complete AND advances active step to next consecutive step
+  const handleToggleComplete = useCallback((nodeId, explicitStatus) => {
+    setCompletedNodes((prev) => {
+      const next = new Set(prev);
+      const willComplete = explicitStatus ? explicitStatus === 'completed' : !prev.has(nodeId);
+
+      if (willComplete) {
+        // Enforce strict prerequisite validation: verify that all incoming parent prerequisites are in completedNodes!
+        if (graphData?.edges && graphData.edges.length > 0) {
+          const parentEdges = graphData.edges.filter((e) => e.target === nodeId);
+          const allParentsCompleted = parentEdges.every((e) => prev.has(e.source));
+          if (!allParentsCompleted) {
+            console.warn(`[Prerequisite Blocked] Cannot complete ${nodeId}: all preceding steps must be completed first.`);
+            return prev;
+          }
+        }
+
+        next.add(nodeId);
+
+        // Automatically advance to the next consecutive step in the workflow sequence
+        if (graphData?.nodes && graphData.nodes.length > 0) {
+          const nextStep = getNextConsecutiveStep(nodeId, graphData.nodes, graphData.edges, next);
+          if (nextStep) {
+            setSelectedNode(nextStep);
+          }
+        }
+      } else {
+        next.delete(nodeId);
+      }
+      return next;
+    });
+  }, [graphData]);
+
   return (
-    <div className="flex flex-col h-screen w-screen bg-slate-950 text-slate-100 overflow-hidden font-sans select-none">
+    <div className="flex flex-col h-screen w-screen bg-[#FAFAFA] text-[#111111] overflow-hidden font-sans select-none">
       {/* Top Navigation Bar (Hidden during print) */}
-      <header className="h-16 shrink-0 bg-slate-900 border-b border-slate-800 px-4 flex items-center justify-between gap-4 z-30 shadow-md no-print">
+      <header className="h-16 shrink-0 bg-[#FFFFFF] border-b border-[#E5E5E5] px-4 flex items-center justify-between gap-4 z-30 shadow-md no-print">
         {/* Brand & Logo */}
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-blue-500 flex items-center justify-center text-white shadow-lg shadow-indigo-600/30">
+        <div
+          onClick={() => setCurrentView('home')}
+          className="flex items-center gap-3 cursor-pointer group"
+          title="Return to Home page"
+        >
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-[#F56600] to-[#E85D00] flex items-center justify-center text-white shadow-lg shadow-[#F56600]/30 group-hover:scale-105 transition-transform">
             <Compass className="w-6 h-6 animate-pulse" />
           </div>
           <div>
-            <h1 className="text-base font-extrabold tracking-tight bg-gradient-to-r from-white via-slate-100 to-slate-400 bg-clip-text text-transparent flex items-center gap-2">
-              CivicPath Visualizer
-              <span className="text-[10px] uppercase font-semibold px-2 py-0.5 rounded-full bg-indigo-950/80 text-indigo-400 border border-indigo-800/60 hidden sm:inline-block">
+            <h1 className="text-base font-extrabold tracking-tight bg-gradient-to-r from-[#111111] via-[#111111] to-[#666666] bg-clip-text text-transparent flex items-center gap-2">
+              CivicPath
+              <span className="text-[10px] uppercase font-semibold px-2 py-0.5 rounded-full bg-[#FFF1E8] text-[#F56600] border border-[#F56600]/30 hidden sm:inline-block">
                 UDCPR 2020 & Acts
               </span>
             </h1>
-            <p className="text-[11px] text-slate-400 hidden sm:block truncate max-w-[340px]">
-              {graphData?.taskTitle || 'Statutory Municipal Clearances Roadmap'}
+            <p className="text-[11px] text-[#666666] hidden sm:block truncate max-w-[340px]">
+              {currentView === 'home'
+                ? 'Maharashtra Construction Permitting Navigator'
+                : (graphData?.taskTitle || 'Statutory Municipal Clearances Roadmap')}
             </p>
           </div>
         </div>
 
-        {/* Center: Search & City Input Form */}
+        {/* Center: Search Form (Visible for rapid construction) */}
         <form
           onSubmit={handleSearchSubmit}
           className="hidden md:flex items-center gap-2 flex-1 max-w-xl mx-4"
         >
           <div className="relative flex-1">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <Search className="w-4 h-4 text-[#888888] absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search civic goal (e.g., Bungalow in Pune, Cloud Kitchen, Gumasta)..."
-              className="w-full bg-slate-800/90 border border-slate-700 rounded-xl pl-9 pr-3 py-2 text-xs text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
+              placeholder="Enter custom requirement (e.g. Commercial complex Pune, School, Hotel, Factory)..."
+              className="w-full bg-[#FAFAFA] border border-[#E5E5E5] rounded-xl pl-9 pr-3 py-2 text-xs text-[#111111] placeholder-[#888888] focus:outline-none focus:ring-2 focus:ring-[#F56600] focus:border-transparent transition-all"
             />
           </div>
 
           <button
             type="submit"
             disabled={loading}
-            className="inline-flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-md shadow-indigo-600/30 transition-all disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 px-4 py-2 bg-[#F56600] hover:bg-[#E85D00] active:bg-[#E85D00] text-white rounded-xl text-xs font-semibold shadow-md shadow-[#F56600]/30 transition-all disabled:opacity-50 cursor-pointer"
           >
             {loading ? (
               <>
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                <span>Deconstructing...</span>
+                <span>Constructing...</span>
               </>
             ) : (
               <>
                 <Sparkles className="w-3.5 h-3.5" />
-                <span>Deconstruct</span>
+                <span>Construct</span>
               </>
             )}
           </button>
         </form>
 
-        {/* Right Actions: Jargon Buster & Mobile Drawer Toggle */}
+        {/* Right Actions: Navigation, Plot Questionnaire, Jargon Buster & Mobile Drawer Toggle */}
         <div className="flex items-center gap-2">
+          {/* Home / Roadmap View Switcher */}
+          {currentView === 'roadmap' ? (
+            <button
+              type="button"
+              onClick={() => setCurrentView('home')}
+              className="inline-flex items-center gap-1.5 px-3 py-2 bg-[#FAFAFA] hover:bg-[#E5E5E5] text-[#111111] border border-[#E5E5E5] rounded-xl text-xs font-semibold transition-all shadow-sm cursor-pointer"
+              title="Return to Home screen"
+            >
+              <Home className="w-4 h-4 text-[#F56600]" />
+              <span className="hidden sm:inline">Home</span>
+            </button>
+          ) : hasConstructedRoadmap && (
+            <button
+              type="button"
+              onClick={() => setCurrentView('roadmap')}
+              className="inline-flex items-center gap-1.5 px-3 py-2 bg-[#FFF1E8] hover:bg-[#FFF1E8]/80 text-[#F56600] border border-[#F56600]/40 rounded-xl text-xs font-semibold transition-all shadow-sm cursor-pointer"
+              title="View your active generated roadmap"
+            >
+              <Compass className="w-4 h-4 text-[#F56600]" />
+              <span className="hidden sm:inline">Active Roadmap</span>
+            </button>
+          )}
+
+          {/* Plot Questionnaire Intake Trigger */}
+          <button
+            type="button"
+            onClick={() => setIsQuestionnaireOpen(true)}
+            className="inline-flex items-center gap-1.5 px-3 py-2 bg-[#FFF1E8] hover:bg-[#FFF1E8]/80 text-[#F56600] border border-[#F56600]/40 rounded-xl text-xs font-bold transition-all shadow-sm cursor-pointer"
+            title="Configure plot parameters to calculate applicable NOCs"
+          >
+            <Sliders className="w-4 h-4 text-[#F56600]" />
+            <span className="hidden sm:inline">Plot Questionnaire</span>
+          </button>
+
+          {/* Jargon Buster */}
           <button
             type="button"
             onClick={() => setIsJargonModalOpen(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold transition-all shadow-sm"
+            className="inline-flex items-center gap-1.5 px-3 py-2 bg-[#FAFAFA] hover:bg-[#E5E5E5] text-[#111111] border border-[#E5E5E5] rounded-xl text-xs font-semibold transition-all shadow-sm cursor-pointer"
             title="Open Civic Jargon Buster glossary"
           >
-            <BookOpen className="w-4 h-4 text-indigo-400" />
+            <BookOpen className="w-4 h-4 text-[#F56600]" />
             <span className="hidden sm:inline">Jargon Buster</span>
           </button>
 
-          {/* Mobile Drawer Toggle */}
-          <button
-            type="button"
-            onClick={() => setMobileDrawerOpen((prev) => !prev)}
-            className="lg:hidden p-2 rounded-xl bg-slate-800 text-slate-200 border border-slate-700"
-            title="Toggle Document Drawer"
-          >
-            {mobileDrawerOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
-          </button>
+          {/* Mobile Drawer Toggle (Only active in roadmap view) */}
+          {currentView === 'roadmap' && (
+            <button
+              type="button"
+              onClick={() => setMobileDrawerOpen((prev) => !prev)}
+              className="lg:hidden p-2 rounded-xl bg-[#FAFAFA] text-[#111111] border border-[#E5E5E5] cursor-pointer"
+              title="Toggle Document Drawer"
+            >
+              {mobileDrawerOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+            </button>
+          )}
         </div>
       </header>
 
-      {/* Preset Pills Bar (Hidden during print) */}
-      <div className="h-10 shrink-0 bg-slate-950/90 border-b border-slate-800 px-4 flex items-center justify-between gap-2 overflow-x-auto text-xs no-print">
-        <div className="flex items-center gap-2">
-          <span className="text-slate-400 font-bold text-[10px] uppercase tracking-wider shrink-0">
-            Quick Templates:
-          </span>
-          {PRESETS.map((preset) => {
-            const Icon = preset.icon;
-            return (
+      {/* VIEW 1: HOME PAGE */}
+      {currentView === 'home' ? (
+        <HomePage
+          searchQuery={searchQuery}
+          setSearchQuery={setSearchQuery}
+          onStartConstruct={handleStartConstruct}
+          onOpenQuestionnaire={() => setIsQuestionnaireOpen(true)}
+          onOpenJargonBuster={() => setIsJargonModalOpen(true)}
+          hasActiveRoadmap={hasConstructedRoadmap}
+          onViewActiveRoadmap={() => setCurrentView('roadmap')}
+          loading={loading}
+          scopeFeedback={scopeFeedback}
+          onClearScopeFeedback={() => setScopeFeedback(null)}
+        />
+      ) : (
+        /* VIEW 2: ROADMAP WORKSPACE */
+        <>
+          {/* Sub-Header Bar: Jurisdiction, Typology & Provenance (Hidden during print) */}
+          <div className="h-10 shrink-0 bg-[#FFFFFF] border-b border-[#E5E5E5] px-4 flex items-center justify-between gap-2 overflow-x-auto text-xs no-print">
+            <div className="flex items-center gap-3">
               <button
-                key={preset.id}
                 type="button"
-                onClick={() => handlePresetSelect(preset)}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white text-[11px] font-medium transition-colors shrink-0"
+                onClick={() => setCurrentView('home')}
+                className="inline-flex items-center gap-1 text-[11px] text-[#666666] hover:text-[#F56600] font-medium cursor-pointer mr-1"
               >
-                <Icon className="w-3 h-3 text-indigo-400" />
-                {preset.label}
+                <span>← Home</span>
               </button>
-            );
-          })}
-        </div>
+              <div className="flex items-center gap-1 text-[#111111] text-[11px]">
+                <MapPin className="w-3.5 h-3.5 text-[#F56600]" />
+                <span>Authority: <strong>{graphData?.jurisdiction?.split('(')[0]?.trim() || questionnaireState.jurisdiction || 'Maharashtra'}</strong></span>
+              </div>
+              <div className="hidden sm:flex items-center gap-1 text-[#111111] text-[11px] px-2 py-0.5 rounded bg-[#FFF1E8] border border-[#F56600]/30">
+                <Building2 className="w-3.5 h-3.5 text-[#F56600]" />
+                <span>Type: <strong className="text-[#F56600] uppercase">{graphData?.constructionType || questionnaireState?.constructionType || 'RESIDENTIAL'}</strong></span>
+              </div>
+            </div>
 
-        <div className="hidden sm:flex items-center gap-1.5 text-[11px] text-slate-400">
-          <MapPin className="w-3.5 h-3.5 text-emerald-400" />
-          <span>Jurisdiction: <strong>{graphData?.jurisdiction?.split('(')[0] || 'Maharashtra ULBs'}</strong></span>
-        </div>
-      </div>
+            {/* Provenance & Timeline Status */}
+            <div className="flex items-center gap-3 text-[11px] text-[#666666]">
+              <span className="hidden sm:inline-block px-2 py-0.5 rounded bg-[#FAFAFA] border border-[#E5E5E5] text-[#111111]">
+                Est. ~{graphData?.totalEstimatedDays || 90} Days • ₹{(graphData?.totalEstimatedCostINR || 58500).toLocaleString('en-IN')}
+              </span>
 
-      {/* Main Workspace Layout (Canvas + Full-Width Responsive Drawer) */}
-      <main className="flex-1 flex overflow-hidden relative">
-        {/* Left: ReactFlow Interactive DAG Canvas */}
-        <div className="flex-1 min-w-0 h-full relative">
-          <RoadmapCanvas
-            graphData={graphData}
-            onSelectNode={handleSelectNode}
-            selectedNodeId={selectedNode?.id}
-          />
-        </div>
+              {/* Provenance Badge */}
+              <div className="flex items-center gap-1.5">
+                <span className={clsx(
+                  "w-2 h-2 rounded-full",
+                  graphData?.provenance === 'live_ai_grounded' ? "bg-[#2BB673] animate-pulse" : "bg-[#F56600]"
+                )} />
+                <span className="text-[#111111] font-medium">
+                  {graphData?.provenanceLabel || (graphData?.provenance === 'live_ai_grounded' ? 'Live AI-tailored' : 'Statutory UDCPR blueprint')}
+                </span>
+              </div>
+            </div>
+          </div>
 
-        {/* Right: Master Document Kit & Step Inspector Drawer */}
-        <div
-          className={`
-            lg:static absolute inset-y-0 right-0 z-30 transition-transform duration-300 ease-in-out
-            ${mobileDrawerOpen ? 'translate-x-0' : 'translate-x-full lg:translate-x-0'}
-            w-full sm:w-[380px] lg:w-[380px] xl:w-[420px] shrink-0 h-full
-          `}
-        >
-          <DocumentDrawer
-            graphData={graphData}
-            selectedNode={selectedNode}
-            onSelectNode={handleSelectNode}
-          />
-        </div>
-      </main>
+          {/* Main Workspace Layout (Canvas + Collapsible Right Drawer) */}
+          <main className="flex-1 flex overflow-hidden relative">
+            {/* Left: ReactFlow Interactive DAG Canvas */}
+            <div className="flex-1 min-w-0 h-full relative">
+              <RoadmapCanvas
+                graphData={graphData}
+                onSelectNode={handleSelectNode}
+                selectedNodeId={selectedNode?.id}
+                completedNodes={completedNodes}
+                onToggleComplete={handleToggleComplete}
+              />
+
+              {/* Legal / Statutory Guidance Disclaimer */}
+              <div className="absolute bottom-3 left-4 z-10 hidden md:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#FFFFFF]/90 backdrop-blur-md border border-[#E5E5E5] text-[11px] text-[#666666] shadow-md">
+                <ShieldCheck className="w-3.5 h-3.5 text-[#F56600] shrink-0" />
+                <span>Statutory guidance only — verify with your Planning Authority or a licensed architect.</span>
+              </div>
+
+              {/* Floating Reopen Button when Sidebar is Minimized */}
+              {!isSidebarOpen && (
+                <button
+                  type="button"
+                  onClick={() => setIsSidebarOpen(true)}
+                  className="absolute right-4 top-14 z-20 flex items-center gap-2 px-3.5 py-2 rounded-xl bg-[#FFFFFF] hover:bg-[#FAFAFA] text-[#111111] border border-[#E5E5E5] shadow-2xl backdrop-blur-md transition-all hover:border-[#F56600]/60 group cursor-pointer"
+                  title="Open Master Dossier & Step Inspector"
+                >
+                  <PanelRightOpen className="w-4 h-4 text-[#F56600] group-hover:scale-110 transition-transform" />
+                  <span className="text-xs font-semibold">
+                    {selectedNode ? (
+                      <span className="flex items-center gap-1.5">
+                        <span className="text-[#666666] font-normal">Step:</span>
+                        <span className="text-[#F56600] font-bold max-w-[150px] truncate">{selectedNode.title}</span>
+                      </span>
+                    ) : (
+                      <span>Open Dossier & Inspector</span>
+                    )}
+                  </span>
+                </button>
+              )}
+            </div>
+
+            {/* Right: Master Document Kit & Step Inspector Drawer (Collapsible) */}
+            <div
+              className={clsx(
+                'transition-all duration-300 ease-in-out z-30 h-full shrink-0',
+                isSidebarOpen
+                  ? 'w-full sm:w-[380px] lg:w-[400px] xl:w-[440px] opacity-100'
+                  : 'w-0 opacity-0 overflow-hidden pointer-events-none hidden lg:block',
+                mobileDrawerOpen && 'fixed inset-y-0 right-0 z-40 !w-full sm:!w-[380px] !opacity-100 !block'
+              )}
+            >
+              <DocumentDrawer
+                graphData={graphData}
+                selectedNode={selectedNode}
+                onSelectNode={handleSelectNode}
+                completedNodes={completedNodes}
+                onToggleComplete={handleToggleComplete}
+                onOpenQuestionnaire={() => setIsQuestionnaireOpen(true)}
+                onClose={() => {
+                  setIsSidebarOpen(false);
+                  setMobileDrawerOpen(false);
+                }}
+              />
+            </div>
+          </main>
+        </>
+      )}
+
+      {/* Plot Questionnaire Intake Modal */}
+      <PlotQuestionnaireModal
+        isOpen={isQuestionnaireOpen}
+        onClose={() => setIsQuestionnaireOpen(false)}
+        initialValues={questionnaireState}
+        onSubmitQuestionnaire={handleQuestionnaireSubmit}
+        loading={loading}
+      />
 
       {/* Jargon Buster Glossary Modal */}
       <JargonBusterModal
         isOpen={isJargonModalOpen}
         onClose={() => setIsJargonModalOpen(false)}
+        graphData={graphData}
       />
     </div>
   );
